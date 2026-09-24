@@ -4,7 +4,7 @@ Two-way file relay between the laptop (hp-pav-dp, Cowork) and a Skillable lab ju
 so scripts written in Cowork run in the lab and their output (text and PNG) comes back
 without copy-and-paste.
 
-Status: **agreed 23 Sep 2026** — build next.
+Status: **agreed 23 Sep 2026.** Laptop watcher live 24 Sep; lab runner built and tested against a mock API, awaiting first lab test.
 
 ## Decisions
 
@@ -83,7 +83,7 @@ sessions\<sessionId>.json      lab heartbeat: host, started, last seen, runner v
 3. **Lab runner** polls `GET /repos/.../commits/main` every 30 s with `If-None-Match` (304s do
    not count against the rate limit). On a new head it lists `jobs\` and picks up any job with
    no `results\<jobId>\result.json`.
-4. It writes `result.json` with `status=running`, then runs the script in a child `pwsh`
+4. It commits `result.json` with `status=running` (so a job is visibly claimed), then runs the script in a child `pwsh`
    (`-NoProfile`), with the helper module pre-imported and `$env:LABRELAY_OUT` pointing at a
    folder for extra files.
 5. When the script ends (or times out) it uploads `output.txt`, `result.json` and any files from
@@ -115,6 +115,7 @@ last 60 minutes before it started; older unclaimed jobs are marked `expired` and
 - `Save-RelayScreenshot [-Name]` — full-screen PNG into `LABRELAY_OUT` (runner is in the
   interactive Admin session, so the desktop is capturable).
 - `Save-RelayFile -Path` — copy a file into `LABRELAY_OUT` for return.
+- `Save-RelayText -Name` — write piped text to its own returned file.
 - Per-script options in a header comment, e.g. `# relay: timeout=1800`.
 
 ## Awkward cases
@@ -128,7 +129,8 @@ last 60 minutes before it started; older unclaimed jobs are marked `expired` and
 | Runner crashes mid-job | Next start finds `status=running` from a dead session → marks it `abandoned` |
 | Large output | `output.txt` truncated at 5 MB (head + tail kept, flag set); single file limit 25 MB; anything bigger rejected with a note |
 | Repo growth | `Start-LabRelay.ps1 -Compact` replaces history with a single orphan commit of the last 7 days; runs automatically when the channel exceeds 50 MB. The lab reads the head fresh each poll, so a force-push is harmless |
-| Token expiry | Refreshed in memory; if refresh fails the runner stops polling and asks for a new device code |
+| Token expiry | Refreshed in memory 10 min before expiry (device-flow tokens refresh without a client secret); if refresh fails the runner shows a new device code |
+| Timestamps | PowerShell 7.4 `ConvertFrom-Json` returns DateTime objects; all comparisons are done in UTC on those objects (a string re-parse was an hour out in BST) |
 | Rate limit | ~120 conditional polls/h; well under 5 000/h |
 | Laptop offline | Jobs and results wait in the repo |
 

@@ -25,8 +25,34 @@ Per-script options go in a header comment:
 
 ## Lab (A-GUI)
 
+In **PowerShell 7** (`pwsh`), as Admin:
+
 ```powershell
 irm https://raw.githubusercontent.com/Don-Paterson/Lab-Relay/main/bootstrap.ps1 | iex
 ```
 
-Enter the code it shows at <https://github.com/login/device>, and approve. *(Lab side: in progress.)*
+1. It checks that github.com, api.github.com and raw.githubusercontent.com present genuine
+   public certificates, and refuses to sign in if any is being inspected.
+2. It shows an 8-character code. On the laptop or phone open <https://github.com/login/device>,
+   enter it, and approve **Lab-Relay-app**.
+3. It polls the channel and runs each job. Leave the window open; Ctrl+C stops it.
+
+The token exists only in that window's memory (8 h, refreshed automatically) and can reach
+only Lab-Relay-Channel.
+
+## Writing scripts for the lab
+
+Everything a script writes to any output stream lands in `output.txt`. These helpers are
+pre-loaded, and anything they save comes back alongside it:
+
+| Helper | Does |
+|---|---|
+| `Save-RelayScreenshot [-Name x] [-PrimaryOnly]` | PNG of the lab desktop |
+| `Save-RelayFile -Path C:\path\file.log` | Return an existing file (.txt .log .json .csv .xml .png .jpg) |
+| `... \| Save-RelayText -Name report.txt` | Write piped text to its own returned file |
+
+Header options: `# relay: timeout=1800` (seconds, default 600, max 7200).
+
+A job is `done` (exit 0), `failed` (non-zero exit or a terminating error), `timeout` (process
+tree killed, partial output kept), `expired` (queued over 60 min before the lab session
+started), `abandoned` (runner stopped mid-job) or `rejected` (integrity check failed).

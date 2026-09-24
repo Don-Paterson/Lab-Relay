@@ -123,17 +123,17 @@ function Sync-Channel {
 }
 
 function Push-Channel {
-    for ($i = 1; $i -le 4; $i++) {
+    for ($i = 1; $i -le 8; $i++) {
         & git -C $paths.Channel push --quiet origin "HEAD:$($cfg.Branch)" 2>&1 | Out-Null
         if ($LASTEXITCODE -eq 0) { return }
         # Usually the lab pushed a result in between. Replay our commit on top.
-        Write-Relay "Push rejected (attempt $i) - rebasing on the remote." WARN
+        if ($i -ge 3) { Write-Relay "Push rejected (attempt $i) - rebasing on the remote." DIM }
         Invoke-Git fetch --quiet origin $cfg.Branch | Out-Null
         & git -C $paths.Channel rebase --quiet "origin/$($cfg.Branch)" 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) { & git -C $paths.Channel rebase --abort 2>&1 | Out-Null; throw 'Rebase onto the channel failed.' }
-        Start-Sleep -Seconds (2 * $i)
+        Start-Sleep -Milliseconds (Get-Random -Minimum 200 -Maximum (400 * $i))
     }
-    throw 'Could not push to the channel after 4 attempts.'
+    throw 'Could not push to the channel after 8 attempts - will retry next cycle (scripts stay in outbox\).'
 }
 
 # ------------------------------------------------------------------ outbox ---
@@ -307,7 +307,11 @@ function Receive-Results {
         $extra = @()
         if ($null -ne $res.PSObject.Properties['exitCode'] -and $null -ne $res.exitCode) { $extra += "exit $($res.exitCode)" }
         if ($null -ne $res.PSObject.Properties['durationSeconds']) { $extra += "$($res.durationSeconds)s" }
-        if ($skipped) { $extra += "$($skipped.Count) file(s) skipped" }
+        if ($res.PSObject.Properties['outputTruncated'] -and $res.outputTruncated) { $extra += 'output truncated' }
+        if ($res.PSObject.Properties['files'] -and @($res.files).Count) { $extra += "$(@($res.files).Count) file(s)" }
+        $labSkipped = if ($res.PSObject.Properties['skipped']) { @($res.skipped).Count } else { 0 }
+        if ($skipped -or $labSkipped) { $extra += "$($skipped.Count + $labSkipped) file(s) refused" }
+        if ($res.PSObject.Properties['note'] -and $res.note) { $extra += $res.note }
         Write-Relay ("Result {0}  {1}  {2}" -f $jobId, $status.ToUpperInvariant(), ($extra -join ', ')) $level
     }
 }

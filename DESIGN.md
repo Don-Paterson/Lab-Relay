@@ -4,7 +4,7 @@ Two-way file relay between the laptop (hp-pav-dp, Cowork) and a Skillable lab ju
 so scripts written in Cowork run in the lab and their output (text and PNG) comes back
 without copy-and-paste.
 
-Status: **agreed 23 Sep 2026.** Laptop watcher live 24 Sep; lab runner built and tested against a mock API, awaiting first lab test.
+Status: **Working end to end — first live lab test passed 24 Sep 2026** (CCES lab, A-GUI, runner 0.1.0): device-flow sign-in, job run, output + PNG screenshot + text file returned.
 
 ## Decisions
 

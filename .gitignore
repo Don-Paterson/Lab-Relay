@@ -1,0 +1,6 @@
+# Lab-Relay working folders - local only, never committed
+/outbox/
+/results/
+/logs/
+/.channel/
+*.tmp

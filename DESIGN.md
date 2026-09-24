@@ -116,7 +116,18 @@ last 60 minutes before it started; older unclaimed jobs are marked `expired` and
   interactive Admin session, so the desktop is capturable).
 - `Save-RelayFile -Path` — copy a file into `LABRELAY_OUT` for return.
 - `Save-RelayText -Name` — write piped text to its own returned file.
-- Per-script options in a header comment, e.g. `# relay: timeout=1800`.
+- Per-script options in header comments:
+  `# relay: timeout=5400 progress=60` and `# relay: watch=C:\CCES-Automation-Logs\*.log` (one path per line).
+
+## Live progress (runner 0.2.0, 24 Sep 2026)
+
+With `progress=N` (30–600 s) the runner, while the job runs, commits output-so-far plus the current
+contents of any `watch=` files (read with shared access, head+tail if huge) and result.json still
+`running` with `progressUtc`, `progressCount`, `elapsedSeconds`. A snapshot is skipped if nothing changed.
+The watcher copies each snapshot into `results\<jobId>\` in place; the final result overwrites it.
+Watched files are also returned in the final result, so wrappers need not copy logs themselves.
+Cost: one small commit per interval while a long job runs. Tested: 80 s job, updates at 30 s and 60 s
+reached the laptop within ~3 s each.
 
 ## Awkward cases
 

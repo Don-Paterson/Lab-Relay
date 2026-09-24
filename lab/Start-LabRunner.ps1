@@ -30,7 +30,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 3.0
-$RunnerVersion = '0.1.0'
+$RunnerVersion = '0.2.0'
 
 if (-not $Root) { $Root = Split-Path -Parent $PSScriptRoot }
 $cfg = Import-PowerShellDataFile -LiteralPath (Join-Path $Root 'config/relay.psd1')
@@ -308,6 +308,78 @@ function Limit-Output {
     return @{ Bytes = $out; Truncated = $true }
 }
 
+function Read-Shared {
+    <# Read a file another process may still be writing (the job's own output, a live log). #>
+    param([string]$Path)
+    # The leading comma returns the byte[] as one object instead of unrolling it into the pipeline.
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return , [byte[]]::new(0) }
+    $fs = [IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite, Delete')
+    try { $ms = [IO.MemoryStream]::new(); $fs.CopyTo($ms); return , $ms.ToArray() } finally { $fs.Dispose() }
+}
+
+function Get-JobOptions {
+    <#  # relay: timeout=5400 progress=60
+        # relay: watch=C:\CCES-Automation-Logs\*.log      (one path or wildcard per line; %VARS% expanded) #>
+    param([byte[]]$Bytes)
+    $o = @{ progress = 0; watch = @() }
+    $text = [Text.Encoding]::UTF8.GetString($Bytes)
+    foreach ($m in [regex]::Matches($text, '(?im)^\s*#\s*relay:\s*(.+?)\s*$')) {
+        $v = $m.Groups[1].Value
+        if ($v -match '^watch=(.+)$') {
+            $o.watch += [Environment]::ExpandEnvironmentVariables($Matches[1].Trim().Trim('"', "'"))
+            continue
+        }
+        foreach ($t in $v -split '\s+') {
+            if ($t -match '^progress=(\d+)$') {
+                $n = [int]$Matches[1]
+                $o.progress = if ($n -eq 0) { 0 } else { [math]::Max(30, [math]::Min(600, $n)) }
+            }
+        }
+    }
+    return $o
+}
+
+function Get-JobSnapshot {
+    <# Everything a job has produced so far: output.txt, LABRELAY_OUT files, watched files. #>
+    param([string]$JobId, [string]$Stdout, [string]$Stderr, [string]$Out, [string[]]$Watch, [string]$Tail)
+    $text = [IO.MemoryStream]::new()
+    $b = Read-Shared $Stdout; $text.Write($b, 0, $b.Length)
+    $e = Read-Shared $Stderr
+    if ($e.Length) {
+        $h = [Text.Encoding]::UTF8.GetBytes("`n===== stderr =====`n"); $text.Write($h, 0, $h.Length); $text.Write($e, 0, $e.Length)
+    }
+    if ($Tail) { $h = [Text.Encoding]::UTF8.GetBytes($Tail); $text.Write($h, 0, $h.Length) }
+    $lim = Limit-Output $text.ToArray()
+
+    $files = [ordered]@{ "results/$JobId/output.txt" = $lim.Bytes }
+    $returned = @(); $skipped = @()
+    $cands = @(Get-ChildItem -LiteralPath $Out -Force -ErrorAction SilentlyContinue | ForEach-Object { @{ F = $_; Watched = $false } })
+    foreach ($w in $Watch) {
+        $cands += @(Get-ChildItem -Path $w -File -Force -ErrorAction SilentlyContinue | ForEach-Object { @{ F = $_; Watched = $true } })
+    }
+    foreach ($c in $cands) {
+        $f = $c.F; $why = $null; $key = "results/$JobId/$($f.Name)"
+        if ($f.PSIsContainer) { $why = 'folder' }
+        elseif ($f.Name -notmatch $FileNameRegex -or $f.Name -in 'output.txt', 'result.json') { $why = 'name' }
+        elseif ($files.Contains($key)) { $why = 'duplicate name' }
+        elseif ($f.Extension.ToLowerInvariant() -notin $cfg.ResultExtensions) { $why = "extension $($f.Extension)" }
+        elseif (-not $c.Watched -and $f.Length -gt $cfg.MaxFileBytes) { $why = "over $([int]($cfg.MaxFileBytes / 1MB)) MB" }
+        if ($why) { if ($skipped -notcontains "$($f.Name) ($why)") { $skipped += "$($f.Name) ($why)" }; continue }
+        try { $bytes = Read-Shared $f.FullName } catch { $skipped += "$($f.Name) (unreadable)"; continue }
+        if ($c.Watched) { $bytes = (Limit-Output $bytes).Bytes }      # live logs: head + tail if huge
+        $files[$key] = $bytes
+        $returned += $f.Name
+    }
+    return @{ Files = $files; Returned = $returned; Skipped = $skipped; OutputBytes = $text.Length; Truncated = $lim.Truncated }
+}
+
+function Get-SnapshotHash {
+    param([Collections.IDictionary]$Files)
+    $sha = [Security.Cryptography.IncrementalHash]::CreateHash('SHA256')
+    foreach ($k in $Files.Keys) { $sha.AppendData([Text.Encoding]::UTF8.GetBytes($k)); $sha.AppendData([byte[]]$Files[$k]) }
+    return [Convert]::ToHexString($sha.GetHashAndReset())
+}
+
 function Invoke-Job {
     param([string]$JobId, [hashtable]$Tree)
     [void]$script:handled.Add($JobId)
@@ -337,11 +409,14 @@ function Invoke-Job {
     }
 
     $timeout = [math]::Min([int]$job.timeout, [int]$cfg.MaxTimeoutSeconds)
+    $opt = Get-JobOptions $bytes
     $started = (Get-Date).ToUniversalTime()
-    $run = $base + [ordered]@{ status = 'running'; startedUtc = $started.ToString('o'); timeout = $timeout }
+    $run = $base + [ordered]@{ status = 'running'; startedUtc = $started.ToString('o'); timeout = $timeout
+                               progress = $opt.progress; watch = @($opt.watch) }
     New-ChannelCommit -Files ([ordered]@{ "results/$JobId/result.json" = (ConvertTo-JsonBytes $run) }) -Message "running $JobId" | Out-Null
     $script:currentJob = $JobId
-    Write-Run "Run    $JobId  (timeout ${timeout}s)" INFO
+    $live = if ($opt.progress) { ", live every $($opt.progress)s" } else { '' }
+    Write-Run "Run    $JobId  (timeout ${timeout}s$live)" INFO
 
     # --- stage and launch --------------------------------------------------------
     $dir = Join-Path $WorkRoot "jobs/$JobId"
@@ -380,12 +455,35 @@ exit `$global:LASTEXITCODE
 
     $status = 'done'
     $deadline = (Get-Date).AddSeconds($timeout)
-    while (-not $proc.WaitForExit([int][math]::Max(250, [math]::Min(15000, ($deadline - (Get-Date)).TotalMilliseconds)))) {
+    $nextProgress = if ($opt.progress) { (Get-Date).AddSeconds($opt.progress) } else { [datetime]::MaxValue }
+    $lastHash = $null; $progressCount = 0
+    while ($true) {
+        $wake = if ($nextProgress -lt $deadline) { $nextProgress } else { $deadline }
+        $ms = [int][math]::Max(250, [math]::Min(15000, ($wake - (Get-Date)).TotalMilliseconds))
+        if ($proc.WaitForExit($ms)) { break }
         if ((Get-Date) -ge $deadline) {
             try { $proc.Kill($true) } catch { }
             $proc.WaitForExit(10000) | Out-Null
             $status = 'timeout'
             break
+        }
+        if ((Get-Date) -ge $nextProgress) {
+            # Live progress: output so far + watched logs, only when something changed.
+            try {
+                $snap = Get-JobSnapshot -JobId $JobId -Stdout $stdout -Stderr $stderr -Out $out -Watch $opt.watch
+                $hash = Get-SnapshotHash $snap.Files
+                if ($hash -ne $lastHash) {
+                    $progressCount++
+                    $pr = $run + [ordered]@{ progressUtc = (Get-UtcNow); progressCount = $progressCount
+                        elapsedSeconds = [int]((Get-Date).ToUniversalTime() - $started).TotalSeconds
+                        outputBytes = $snap.OutputBytes; files = $snap.Returned; skipped = $snap.Skipped }
+                    $snap.Files["results/$JobId/result.json"] = ConvertTo-JsonBytes $pr
+                    New-ChannelCommit -Files $snap.Files -Message "progress $JobId #$progressCount" | Out-Null
+                    $lastHash = $hash
+                    Write-Run ("Live   {0}  update {1}  ({2}s, {3} KB)" -f $JobId, $progressCount, $pr.elapsedSeconds, [int]($snap.OutputBytes / 1KB)) DIM
+                }
+            } catch { Write-Run "Progress upload failed: $($_.Exception.Message)" DIM }
+            $nextProgress = (Get-Date).AddSeconds($opt.progress)
         }
         try { Send-Heartbeat } catch { Write-Run "Heartbeat failed: $($_.Exception.Message)" DIM }
     }
@@ -395,35 +493,15 @@ exit `$global:LASTEXITCODE
     Remove-Item Env:LABRELAY_OUT, Env:LABRELAY_JOB, Env:LABRELAY_SESSION -ErrorAction SilentlyContinue
 
     # --- collect -----------------------------------------------------------------
-    $text = [IO.MemoryStream]::new()
-    if (Test-Path -LiteralPath $stdout) { $b = [IO.File]::ReadAllBytes($stdout); $text.Write($b, 0, $b.Length) }
-    if ((Test-Path -LiteralPath $stderr) -and (Get-Item -LiteralPath $stderr).Length -gt 0) {
-        $h = [Text.Encoding]::UTF8.GetBytes("`n===== stderr =====`n"); $text.Write($h, 0, $h.Length)
-        $b = [IO.File]::ReadAllBytes($stderr); $text.Write($b, 0, $b.Length)
-    }
-    if ($status -eq 'timeout') {
-        $h = [Text.Encoding]::UTF8.GetBytes("`n===== Lab-Relay: killed after $timeout s (timeout) =====`n"); $text.Write($h, 0, $h.Length)
-    }
-    $lim = Limit-Output $text.ToArray()
-
-    $files = [ordered]@{ "results/$JobId/output.txt" = $lim.Bytes }
-    $returned = @(); $skipped = @()
-    foreach ($f in Get-ChildItem -LiteralPath $out -Force -ErrorAction SilentlyContinue) {
-        $why = $null
-        if ($f.PSIsContainer) { $why = 'folder' }
-        elseif ($f.Name -notmatch $FileNameRegex -or $f.Name -in 'output.txt', 'result.json') { $why = 'name' }
-        elseif ($f.Extension.ToLowerInvariant() -notin $cfg.ResultExtensions) { $why = "extension $($f.Extension)" }
-        elseif ($f.Length -gt $cfg.MaxFileBytes) { $why = "over $([int]($cfg.MaxFileBytes / 1MB)) MB" }
-        if ($why) { $skipped += "$($f.Name) ($why)"; continue }
-        $files["results/$JobId/$($f.Name)"] = [IO.File]::ReadAllBytes($f.FullName)
-        $returned += $f.Name
-    }
+    $tail = if ($status -eq 'timeout') { "`n===== Lab-Relay: killed after $timeout s (timeout) =====`n" } else { $null }
+    $snap = Get-JobSnapshot -JobId $JobId -Stdout $stdout -Stderr $stderr -Out $out -Watch $opt.watch -Tail $tail
+    $files = $snap.Files; $returned = $snap.Returned; $skipped = $snap.Skipped
     $result = $base + [ordered]@{
         status = $status; exitCode = $exit
         startedUtc = $started.ToString('o'); finishedUtc = $finished.ToString('o')
         durationSeconds = [math]::Round(($finished - $started).TotalSeconds, 1); timeout = $timeout
-        outputBytes = $text.Length; outputTruncated = $lim.Truncated
-        files = $returned; skipped = $skipped
+        outputBytes = $snap.OutputBytes; outputTruncated = $snap.Truncated
+        files = $returned; skipped = $skipped; progressUpdates = $progressCount
     }
     $files["results/$JobId/result.json"] = ConvertTo-JsonBytes $result   # last entry; same commit
     New-ChannelCommit -Files $files -Message "$status $JobId" | Out-Null

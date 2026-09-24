@@ -102,7 +102,7 @@ def diagram():
 story = []
 story += [P('Lab-Relay', 'title'),
           P('Two-way file relay between the laptop (Cowork) and a Skillable lab jump host (A-GUI) &mdash; reference guide', 'sub'),
-          table([['Status', 'Working end to end. First live test passed 24 Sep 2026 (CCES lab, runner 0.1.0).'],
+          table([['Status', 'Working end to end. First live test passed 24 Sep 2026 (CCES lab, runner 0.1.0). Runner 0.2.0 adds live progress.'],
                  ['Code', 'github.com/Don-Paterson/Lab-Relay (public) &middot; local clone Documents\\ClaudeCowork\\Lab-Relay'],
                  ['Channel', 'github.com/Don-Paterson/Lab-Relay-Channel (private, Actions disabled)'],
                  ['GitHub App', 'Lab-Relay-app &middot; client ID Iv23liW99Woo8kRBZE5p &middot; Contents: read/write &middot; installed on Lab-Relay-Channel only'],
@@ -249,11 +249,11 @@ story += [H1('8. Awkward cases'),
                  ['Upstream starts inspecting GitHub', 'TLS guard refuses to sign in and says why.']], [48, 122])]
 
 story += [KeepTogether([H1('9. Running the CCES automation through the relay'),
-          P('Each job is a thin wrapper that does exactly what a manual run does &mdash; it calls the CCES bootstrap from GitHub <b>main</b> in its non-menu form, then returns the logs:'),
-          code(r'''# relay: timeout=3600
+          P('Each job is a thin wrapper that does exactly what a manual run does &mdash; it calls the CCES bootstrap from GitHub <b>main</b> in its non-menu form; the watch line returns the CCES logs live and at the end:'),
+          code(r'''# relay: timeout=3600 progress=60
+# relay: watch=C:\CCES-Automation-Logs\*.log
 $u = 'https://raw.githubusercontent.com/Don-Paterson/CCES-R8120-Automation/main/bootstrap.ps1'
-& ([scriptblock]::Create((irm $u))) -Action Prereqs
-Get-ChildItem C:\CCES-Automation-Logs -File | ForEach-Object { Save-RelayFile -Path $_.FullName }''')]),
+& ([scriptblock]::Create((irm $u))) -Action Prereqs''')]),
           H2('Change control &mdash; one line of history'),
           *B(['All CCES changes are made in <b>Documents\\ClaudeCowork\\CCES-R8120-Automation</b> (your local clone) and pushed to <b>main</b> by you with Update-Repo.ps1.',
               'The lab only ever gets CCES code from GitHub main &mdash; the same as your manual irm | iex. Changed CCES files are <b>never</b> sent through the relay.',
@@ -261,19 +261,20 @@ Get-ChildItem C:\CCES-Automation-Logs -File | ForEach-Object { Save-RelayFile -P
               'Fix-and-test loop: Claude edits &rarr; you push &rarr; Claude queues a wrapper job &rarr; lab pulls the new main &rarr; Claude reads the result.',
               'The repo zip the bootstrap downloads is current immediately; bootstrap.ps1 itself comes from raw.githubusercontent.com, which caches for up to about 5 minutes.'])]
 
-story += [KeepTogether([H2('Long stages and near-real-time monitoring (planned: runner 0.2)'),
-          P('Today a result arrives only when the job finishes. That suits short stages (Prereqs, DryRun) but leaves a 20-40 minute FTW or Jumbo (JHFA) install '
-            'invisible until the end. The planned change is <b>progress uploads</b>, entirely inside Lab-Relay:')]),
+story += [KeepTogether([H2('Long stages and near-real-time monitoring (runner 0.2 - built and tested)'),
+          P('Without it, a result arrives only when the job finishes &mdash; fine for short stages (Prereqs, DryRun), but a 20-40 minute FTW or Jumbo (JHFA) install '
+            'would be invisible until the end. <b>Progress uploads</b> (runner 0.2) close that gap, entirely inside Lab-Relay:')]),
           table([['Piece', 'Change'],
-                 ['Job header', 'New options, e.g. <font name="Mono"># relay: timeout=5400 progress=60 watch=C:\\CCES-Automation-Logs\\*.log</font>'],
+                 ['Job header', '<font name="Mono"># relay: timeout=5400 progress=60</font> and, one per line, <font name="Mono"># relay: watch=C:\\CCES-Automation-Logs\\*.log</font>. progress is 30-600 s.'],
                  ['Runner', 'While the job runs, every <i>progress</i> seconds it commits output-so-far plus current copies of the watched log files, with result.json still <i>running</i> '
-                            'and a progress timestamp. Skipped when nothing changed. Final commit as today.'],
+                            'and a progress timestamp. Skipped when nothing changed. Watched files also come back in the final result.'],
                  ['Watcher', 'Copies running snapshots into results\\&lt;jobId&gt;\\ as they arrive (overwritten by each newer snapshot, then by the final result), '
-                             'and shows "updated hh:mm" lines.'],
+                             'and logs a "Live ... update n" line.'],
                  ['Cost', 'About one small commit a minute while a long job runs (~40 for a Jumbo install); compaction keeps the channel small.'],
                  ['CCES scripts', '<b>No change needed for monitoring</b> &mdash; they already log to C:\\CCES-Automation-Logs and print progress to the console. '
                                   'A CCES change would only be needed if a stage prompts for input (jobs are non-interactive); that is checked by reading the code first.']], [26, 144]),
-          P('Result: Claude sees the console output and CCES logs about a minute behind, can spot a stall or error mid-install, and can decide whether to let it run, stop it, or fix and re-run.', 'small')]
+          P('Tested: an 80-second job with progress=30 delivered updates at 30 s and 60 s, each on the laptop within about 3 s, then the final result. '
+            'In practice Claude sees console output and CCES logs about a minute behind and can spot a stall or error mid-install.', 'small')]
 
 story += [KeepTogether([H1('10. Troubleshooting'), Spacer(1,0)]),
           table([['Symptom', 'Check'],

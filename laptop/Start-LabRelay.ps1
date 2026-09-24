@@ -25,6 +25,11 @@
 .PARAMETER Compact
     Squash the channel history now, then continue (or exit with -Once).
 
+.PARAMETER PurgeJob
+    Job ID(s) whose script files must be removed from the channel for good (for example a
+    script that should never have been sent). Removes jobs\<id>\*.ps1, then squashes the
+    history so the content is no longer reachable from the branch. Implies -Compact.
+
 .PARAMETER ChannelUrl
     Override the channel remote. For testing against a local bare repository.
 
@@ -39,6 +44,7 @@ param(
     [string]$Root,
     [switch]$Once,
     [switch]$Compact,
+    [string[]]$PurgeJob,
     [string]$ChannelUrl
 )
 
@@ -187,6 +193,20 @@ function Move-Unique {
     return $dest
 }
 
+# Scripts travel through GitHub, so a credential written into one would be stored there.
+# Lab jobs must read credentials on the lab side (e.g. from the CCES lab-settings.psd1).
+$SecretPatterns = @(
+    @{ Why = 'a GitHub token';                  Rx = '\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{20,}' }
+    @{ Why = 'a literal password after -pw';    Rx = '(?i)(^|\s)-pw\s+[''"][^''"$]+[''"]' }
+    @{ Why = 'a literal password assignment';   Rx = '(?i)\$\w*(pass(word)?|pwd|secret|token|apikey)\w*\s*=\s*[''"][^''"$]{3,}[''"]' }
+    @{ Why = 'a literal password setting';      Rx = '(?i)\w*(password|passwd|secret)\w*\s*[:=]\s*[''"][^''"$]{3,}[''"]' }
+)
+function Test-ScriptSecrets {
+    param([string]$Text)
+    foreach ($p in $SecretPatterns) { if ($Text -match $p.Rx) { return $p.Why } }
+    return $null
+}
+
 function Publish-Outbox {
     $files = Get-ChildItem -LiteralPath $paths.Outbox -File -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -notmatch '^[.~]|\.tmp$|~$' } | Sort-Object LastWriteTimeUtc
@@ -206,7 +226,14 @@ function Publish-Outbox {
             Write-Relay "Not sent: $($f.Name) is larger than $([int]($cfg.MaxFileBytes / 1MB)) MB." WARN
             continue
         }
-        if (Test-FileReady $f) { $ready += $f }
+        if (-not (Test-FileReady $f)) { continue }
+        $why = Test-ScriptSecrets ([IO.File]::ReadAllText($f.FullName))
+        if ($why) {
+            Move-Unique $f.FullName $paths.Rejected $f.Name | Out-Null
+            Write-Relay "Not sent: $($f.Name) appears to contain $why. Read credentials on the lab side instead. Moved to outbox\rejected\." ERROR
+            continue
+        }
+        $ready += $f
     }
     if (-not $ready) { return }
 
@@ -269,7 +296,8 @@ function Receive-Results {
         try { $res = Get-Content -LiteralPath $rj -Raw | ConvertFrom-Json } catch { continue }
         $status = "$($res.status)"
 
-        if ($status -notin $TerminalState) {
+        $isLive = ($status -notin $TerminalState) -and $res.PSObject.Properties['progressUtc'] -and $res.progressUtc
+        if ($status -notin $TerminalState -and -not $isLive) {
             if ($script:reported[$jobId] -ne $status) {
                 $script:reported[$jobId] = $status
                 Write-Relay "Lab    $jobId  $status" DIM
@@ -296,12 +324,20 @@ function Receive-Results {
             Copy-Item -LiteralPath $f.FullName -Destination $tmp -Force
             Move-Item -LiteralPath $tmp -Destination (Join-Path $dest $f.Name) -Force
         }
+        if (-not $skipped) { Remove-Item -LiteralPath (Join-Path $dest '_skipped.txt') -Force -ErrorAction SilentlyContinue }
         if ($skipped) {
             Set-Content -LiteralPath (Join-Path $dest '_skipped.txt') -Encoding utf8NoBOM -Value (
                 @('Files the lab returned that the collector did not accept:') + $skipped)
         }
         Copy-Item -LiteralPath $rj -Destination $localRj -Force
 
+        if ($isLive) {
+            # A progress snapshot from a job that is still running: files are refreshed in place.
+            $script:reported[$jobId] = $status
+            $el = if ($res.PSObject.Properties['elapsedSeconds']) { "$($res.elapsedSeconds)s in" } else { '' }
+            Write-Relay ("Live   {0}  update {1}  {2}  -> results\{0}\" -f $jobId, $res.progressCount, $el) DIM
+            continue
+        }
         $script:reported[$jobId] = $status
         $level = if ($status -eq 'done') { 'OK' } else { 'WARN' }
         $extra = @()
@@ -401,6 +437,22 @@ try {
     Write-Host ''
 
     Initialize-Channel
+    if ($PurgeJob) {
+        Sync-Channel
+        $gone = 0
+        foreach ($id in $PurgeJob) {
+            if ($id -notmatch $JobIdPattern) { Write-Relay "Not a job ID: $id" WARN; continue }
+            foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $paths.Channel "jobs/$id") -Filter *.ps1 -File -ErrorAction SilentlyContinue)) {
+                Invoke-Git rm --quiet -- "jobs/$id/$($f.Name)" | Out-Null; $gone++
+            }
+        }
+        if ($gone) {
+            Invoke-Git commit --quiet -m "purge $gone script file(s)" | Out-Null
+            Push-Channel
+            Write-Relay "Removed $gone script file(s) from the channel; squashing history..." WARN
+        } else { Write-Relay 'Nothing to remove for the given job ID(s).' WARN }
+        $Compact = $true
+    }
     if ($Compact) { Invoke-Compact -Force }
     Write-Relay ("Channel ready ({0} MB). Watching outbox\ - results are checked every {1}s." -f (Get-ChannelSizeMB), $cfg.PollSeconds) OK
 

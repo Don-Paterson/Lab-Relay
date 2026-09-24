@@ -51,7 +51,16 @@ pre-loaded, and anything they save comes back alongside it:
 | `Save-RelayFile -Path C:\path\file.log` | Return an existing file (.txt .log .json .csv .xml .png .jpg) |
 | `... \| Save-RelayText -Name report.txt` | Write piped text to its own returned file |
 
-Header options: `# relay: timeout=1800` (seconds, default 600, max 7200).
+Header options:
+
+```powershell
+# relay: timeout=5400 progress=60            # seconds; progress = live updates (min 30, max 600)
+# relay: watch=C:\CCES-Automation-Logs\*.log  # file(s) to send live and at the end (one per line)
+```
+
+`timeout` defaults to 600 s (max 7200). With `progress`, the runner pushes the output so far and the
+watched files every N seconds while the job runs; the watcher refreshes them in `results\<jobId>\`
+(status stays `running` in result.json until the final result replaces it).
 
 A job is `done` (exit 0), `failed` (non-zero exit or a terminating error), `timeout` (process
 tree killed, partial output kept), `expired` (queued over 60 min before the lab session

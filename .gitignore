@@ -4,3 +4,5 @@
 /logs/
 /.channel/
 *.tmp
+# copies of files Claude delivers into this folder
+/Claude outputs/

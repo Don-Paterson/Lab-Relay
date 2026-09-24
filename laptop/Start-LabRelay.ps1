@@ -398,6 +398,7 @@ try {
 
     Initialize-Channel
     if ($Compact) { Invoke-Compact -Force }
+    Write-Relay ("Channel ready ({0} MB). Watching outbox\ - results are checked every {1}s." -f (Get-ChannelSizeMB), $cfg.PollSeconds) OK
 
     $nextPull = [datetime]::MinValue
     $nextCompact = (Get-Date).AddMinutes(10)
